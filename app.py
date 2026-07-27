@@ -75,7 +75,7 @@ def load_model():
     model.fc = nn.Linear(num_ftrs, 2)
     
     # Path to model weights
-    model_path = "caviai_model.pth"
+    model_path = "caviAI_v1.pth"
     model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
     model.eval()
     return model
@@ -123,7 +123,7 @@ with st.sidebar:
     if model_loaded:
         st.success("🟢 Model Engine Online")
     else:
-        st.error("🔴 Model Weights Not Found (`caviai_model.pth`)")
+        st.error("🔴 Model Weights Not Found (`caviAI_v1.pth`)")
 
 # ==========================================
 # 4. MAIN INTERFACE
