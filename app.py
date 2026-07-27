@@ -162,8 +162,8 @@ if uploaded_file is not None:
                     outputs = model(input_tensor)
                     probabilities = torch.softmax(outputs, dim=1)[0]
                     
-                non_cavity_prob = probabilities[0].item()
-                cavity_prob = probabilities[1].item()
+                non_cavity_prob = probabilities[1].item()
+                cavity_prob = probabilities[0].item()
                 
                 is_cavity = cavity_prob >= sensitivity_threshold
 
