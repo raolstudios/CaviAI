@@ -43,7 +43,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. GRAD-CAM & HEATMAP (PURE PIL/MATPLOTLIB)
+# 2. GRAD-CAM & HEATMAP (INDEX 0 = CAVITY)
 # ==========================================
 class ResNetGradCAM:
     def __init__(self, model):
@@ -61,7 +61,7 @@ class ResNetGradCAM:
     def _save_gradients(self, module, grad_input, grad_output):
         self.gradients = grad_output[0]
 
-    def generate_heatmap(self, input_tensor, class_idx=1):
+    def generate_heatmap(self, input_tensor, class_idx=0):
         self.model.eval()
         output = self.model(input_tensor)
         self.model.zero_grad()
@@ -81,17 +81,16 @@ class ResNetGradCAM:
         if np.max(cam) > 0:
             cam = cam / np.max(cam)
             
-        return cam, torch.softmax(output, dim=1)[0][1].item()
+        # Target Index 0 for Cavity Probability
+        return cam, torch.softmax(output, dim=1)[0][0].item()
 
 def overlay_heatmap(original_pil, heatmap_arr, alpha=0.4):
     """Blends heatmap with raw radiograph without requiring OpenCV."""
     w, h = original_pil.size
     
-    # Resize heatmap array to match original image dimensions using PIL
     heatmap_pil = Image.fromarray((heatmap_arr * 255).astype(np.uint8)).resize((w, h), Image.Resampling.BILINEAR)
     heatmap_norm = np.array(heatmap_pil) / 255.0
     
-    # Apply JET color map using Matplotlib
     cmap = plt.get_cmap('jet')
     heatmap_color = (cmap(heatmap_norm)[:, :, :3] * 255).astype(np.uint8)
     
@@ -200,7 +199,8 @@ if uploaded_file is not None:
             input_tensor = transform(raw_image).unsqueeze(0)
             input_tensor.requires_grad = True
             
-            cam, cavity_prob = grad_cam.generate_heatmap(input_tensor, class_idx=1)
+            # Pass class_idx=0 for Cavity
+            cam, cavity_prob = grad_cam.generate_heatmap(input_tensor, class_idx=0)
             processed_image = overlay_heatmap(raw_image, cam)
             is_cavity = cavity_prob >= sensitivity_threshold
 
