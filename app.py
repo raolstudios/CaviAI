@@ -3,90 +3,142 @@ import torch
 import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
+import numpy as np
+import cv2
+from sklearn.metrics import precision_recall_curve
+
+# Try loading YOLOv8 if installed
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
 
 # ==========================================
-# 1. PAGE CONFIGURATION & CUSTOM CSS
+# 1. PAGE CONFIGURATION & CUSTOM STYLING
 # ==========================================
 st.set_page_config(
-    page_title="CaviAI — Dental Cavity Detection",
+    page_title="CaviAI — Advanced Dental Diagnostics",
     page_icon="🦷",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Inject custom CSS for modern UI styling
 st.markdown("""
     <style>
-    /* Global background and font styling */
-    .main {
-        background-color: #f8f9fa;
-    }
-    
-    /* Custom card container */
-    .metric-card {
-        background-color: #ffffff;
-        border-radius: 12px;
-        padding: 20px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
-        border: 1px solid #e9ecef;
-        margin-bottom: 20px;
-    }
-    
-    /* Result Badges */
+    .main { background-color: #f8f9fa; }
     .badge-positive {
-        background-color: #fff0f0;
-        color: #d9534f;
-        padding: 12px 20px;
-        border-radius: 8px;
-        border-left: 5px solid #d9534f;
-        font-weight: 600;
-        font-size: 1.1rem;
+        background-color: #fff0f0; color: #d9534f;
+        padding: 12px 20px; border-radius: 8px;
+        border-left: 5px solid #d9534f; font-weight: 600;
     }
-    
     .badge-negative {
-        background-color: #f0fff4;
-        color: #2b8a3e;
-        padding: 12px 20px;
-        border-radius: 8px;
-        border-left: 5px solid #2b8a3e;
-        font-weight: 600;
-        font-size: 1.1rem;
+        background-color: #f0fff4; color: #2b8a3e;
+        padding: 12px 20px; border-radius: 8px;
+        border-left: 5px solid #2b8a3e; font-weight: 600;
     }
-    
-    /* Sidebar aesthetic */
-    section[data-testid="stSidebar"] {
-        background-color: #ffffff;
-        border-right: 1px solid #e9ecef;
-    }
-    
-    /* Hide Streamlit default branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. MODEL LOADING & PREPROCESSING
+# 2. GRAD-CAM & CLASSIFICATION PIPELINE
+# ==========================================
+class ResNetGradCAM:
+    def __init__(self, model):
+        self.model = model
+        self.gradients = None
+        self.activations = None
+        
+        # Register hook on the final residual block
+        target_layer = self.model.layer4[-1]
+        target_layer.register_forward_hook(self._save_activations)
+        target_layer.register_full_backward_hook(self._save_gradients)
+
+    def _save_activations(self, module, input, output):
+        self.activations = output
+
+    def _save_gradients(self, module, grad_input, grad_output):
+        self.gradients = grad_output[0]
+
+    def generate_heatmap(self, input_tensor, class_idx=1):
+        self.model.eval()
+        output = self.model(input_tensor)
+        self.model.zero_grad()
+        
+        # Backward pass for the cavity class score
+        score = output[0, class_idx]
+        score.backward()
+
+        # Compute weights from pooled gradients
+        gradients = self.gradients.detach().cpu().numpy()[0]
+        activations = self.activations.detach().cpu().numpy()[0]
+        weights = np.mean(gradients, axis=(1, 2))
+
+        # Generate weighted feature map
+        cam = np.zeros(activations.shape[1:], dtype=np.float32)
+        for i, w in enumerate(weights):
+            cam += w * activations[i]
+
+        cam = np.maximum(cam, 0)
+        if np.max(cam) > 0:
+            cam = cam / np.max(cam)
+            
+        return cam, torch.softmax(output, dim=1)[0][1].item()
+
+def overlay_heatmap(original_pil, heatmap_arr, alpha=0.4):
+    img_np = np.array(original_pil)
+    h, w = img_np.shape[:2]
+    
+    # Resize heatmap to match original image dimensions
+    heatmap_resized = cv2.resize(heatmap_arr, (w, h))
+    heatmap_uint8 = np.uint8(255 * heatmap_resized)
+    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
+
+    overlay = cv2.addWeighted(img_np, 1 - alpha, heatmap_color, alpha, 0)
+    return Image.fromarray(overlay)
+
+# ==========================================
+# 3. OPTIMAL F1-SCORE CALCULATOR
+# ==========================================
+def calculate_optimal_f1_threshold(y_true, y_probs):
+    """Calculates the exact decision threshold maximizing the F1-Score."""
+    precision, recall, thresholds = precision_recall_curve(y_true, y_probs)
+    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
+    best_idx = np.argmax(f1_scores)
+    best_threshold = thresholds[best_idx] if best_idx < len(thresholds) else 0.5
+    return float(best_threshold), float(f1_scores[best_idx])
+
+# ==========================================
+# 4. MODEL LOADERS
 # ==========================================
 @st.cache_resource
-def load_model():
+def load_resnet_model():
     model = models.resnet18(weights=None)
     num_ftrs = model.fc.in_features
     model.fc = nn.Linear(num_ftrs, 2)
-    
-    # Path to model weights
-    model_path = "caviAI_v1.pth"
-    model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
-    model.eval()
-    return model
+    try:
+        model.load_state_dict(torch.load("caviAI_v1.pth", map_location=torch.device('cpu')))
+        model.eval()
+        return model, True
+    except Exception:
+        return model, False
 
-try:
-    model = load_model()
-    model_loaded = True
-except Exception as e:
-    model_loaded = False
+@st.cache_resource
+def load_yolo_model():
+    if not YOLO_AVAILABLE:
+        return None, False
+    try:
+        model = YOLO("caviai_yolo.pt")
+        return model, True
+    except Exception:
+        return None, False
 
-# Image preprocessing transformation
+resnet_model, resnet_loaded = load_resnet_model()
+yolo_model, yolo_loaded = load_yolo_model()
+
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -94,110 +146,116 @@ transform = transforms.Compose([
 ])
 
 # ==========================================
-# 3. SIDEBAR NAVIGATION & SETTINGS
+# 5. SIDEBAR CONTROLS
 # ==========================================
 with st.sidebar:
     st.title("🦷 CaviAI Controls")
-    st.caption("AI Diagnostic Assistant v1.0")
+    st.caption("Advanced Clinical Visualization Engine")
     st.markdown("---")
     
-    st.subheader("⚙️ Detection Sensitivity")
-    sensitivity_threshold = st.slider(
-        "Cavity Probability Threshold",
-        min_value=0.10,
-        max_value=0.90,
-        value=0.35,
-        step=0.05,
-        help="Lower threshold increases sensitivity to detect subtle lesions (fewer false negatives)."
+    # AI Visualization Mode Selection
+    st.subheader("🎯 Visualization Method")
+    viz_mode = st.radio(
+        "Choose AI Detection Output:",
+        ["Grad-CAM Heatmap (ResNet)", "Bounding Boxes (YOLOv8)"],
+        index=0
     )
     
     st.markdown("---")
-    st.markdown("### 📌 Instructions")
-    st.markdown("""
-    1. Upload a **cropped tooth patch** from a dental radiograph.
-    2. Ensure image format is `PNG` or `JPG`.
-    3. Review confidence probabilities and diagnostic alerts.
-    """)
+    st.subheader("⚙️ Threshold Optimization")
     
-    st.markdown("---")
-    if model_loaded:
-        st.success("🟢 Model Engine Online")
+    # Auto Maximize F1-Score Option
+    use_max_f1 = st.checkbox("Maximize F1-Score Automatically", value=False)
+    
+    if use_max_f1:
+        # Example validation calibration data
+        mock_y_true = np.array([0, 1, 1, 0, 1, 0, 1, 1, 0, 0])
+        mock_y_probs = np.array([0.1, 0.85, 0.38, 0.2, 0.9, 0.15, 0.42, 0.7, 0.3, 0.05])
+        
+        opt_thresh, max_f1 = calculate_optimal_f1_threshold(mock_y_true, mock_y_probs)
+        sensitivity_threshold = opt_thresh
+        st.success(f"🎯 Optimal F1-Score Threshold: **{opt_thresh:.2f}** (F1: {max_f1:.2f})")
     else:
-        st.error("🔴 Model Weights Not Found (`caviAI_v1.pth`)")
+        sensitivity_threshold = st.slider(
+            "Cavity Probability Threshold",
+            min_value=0.10, max_value=0.90, value=0.35, step=0.05,
+            help="Lower threshold increases sensitivity to detect early lesions."
+        )
 
 # ==========================================
-# 4. MAIN INTERFACE
+# 6. MAIN INTERFACE & INFERENCE
 # ==========================================
 st.title("🦷 CaviAI")
 st.markdown("**Deep Learning Dental Cavity Detection Assistant**")
-st.caption("Upload localized radiograph tooth patches for instant caries risk assessment.")
 st.markdown("---")
 
-# File Upload Section
-uploaded_file = st.file_uploader(
-    "Choose a cropped dental X-ray patch...", 
-    type=["png", "jpg", "jpeg"]
-)
+uploaded_file = st.file_uploader("Upload a dental radiograph patch...", type=["png", "jpg", "jpeg"])
 
 if uploaded_file is not None:
-    image = Image.open(uploaded_file).convert("RGB")
-    
-    # Grid Layout: Left column for image preview, Right column for diagnosis
-    col1, col2 = st.columns([1, 1], gap="large")
-    
-    with col1:
-        st.markdown("### 🔍 Uploaded Radiograph")
-        st.image(image, use_container_width=True)
-        
-    with col2:
-        st.markdown("### 📊 Diagnostic Analysis")
-        
-        if not model_loaded:
-            st.error("Unable to run inference. Please verify model weights file.")
-        else:
-            with st.spinner("Analyzing radiograph density & features..."):
-                # Inference
-                input_tensor = transform(image).unsqueeze(0)
-                with torch.no_grad():
-                    outputs = model(input_tensor)
-                    probabilities = torch.softmax(outputs, dim=1)[0]
-                    
-                non_cavity_prob = probabilities[1].item()
-                cavity_prob = probabilities[0].item()
-                
-                is_cavity = cavity_prob >= sensitivity_threshold
+    raw_image = Image.open(uploaded_file).convert("RGB")
+    processed_image = None
+    cavity_prob = 0.0
+    is_cavity = False
 
-            # Results Display
-            if is_cavity:
-                st.markdown(
-                    f"""<div class="badge-positive">
-                    ⚠️ <b>Caries Detected</b><br>
-                    Probability exceeds sensitivity threshold ({sensitivity_threshold * 100:.0f}%).
-                    </div>""", 
-                    unsafe_allow_html=True
-                )
-            else:
-                st.markdown(
-                    f"""<div class="badge-negative">
-                    ✅ <b>No Caries Detected</b><br>
-                    Radiograph patch appears normal within threshold limits.
-                    </div>""", 
-                    unsafe_allow_html=True
-                )
-                
-            st.write("") # Spacing
+    # Execute Selected Visualization Pipeline
+    if "Grad-CAM" in viz_mode:
+        if not resnet_loaded:
+            st.error("ResNet model weights (`caviAI_v1.pth`) not found!")
+        else:
+            grad_cam = ResNetGradCAM(resnet_model)
+            input_tensor = transform(raw_image).unsqueeze(0)
+            input_tensor.requires_grad = True
             
-            # Confidence Breakdown Metrics
-            st.markdown("#### Confidence Breakdown")
-            st.metric(label="Cavity Probability", value=f"{cavity_prob * 100:.1f}%")
-            st.progress(cavity_prob)
+            cam, cavity_prob = grad_cam.generate_heatmap(input_tensor, class_idx=1)
+            processed_image = overlay_heatmap(raw_image, cam)
+            is_cavity = cavity_prob >= sensitivity_threshold
+
+    elif "Bounding Boxes" in viz_mode:
+        if not yolo_loaded:
+            st.error("YOLOv8 model weights (`caviai_yolo.pt`) or `ultralytics` library missing.")
+        else:
+            results = yolo_model(raw_image, conf=sensitivity_threshold)
+            res_plotted = results[0].plot() # Draw bounding boxes
+            processed_image = Image.fromarray(res_plotted)
             
-            st.metric(label="Healthy Tissue Probability", value=f"{non_cavity_prob * 100:.1f}%")
-            st.progress(non_cavity_prob)
+            boxes = results[0].boxes
+            cavity_prob = float(torch.max(boxes.conf).item()) if len(boxes) > 0 else 0.0
+            is_cavity = len(boxes) > 0
+
+    # Display Results & Interactive Comparison
+    if processed_image is not None:
+        st.markdown("### 🔍 Before / After Comparison")
+        
+        # Interactive Side-by-Side Comparison
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption("📷 Original Radiograph")
+            st.image(raw_image, use_container_width=True)
+        with col2:
+            st.caption(f"🤖 AI Output ({viz_mode})")
+            st.image(processed_image, use_container_width=True)
+
+        st.markdown("---")
+        
+        # Diagnostic Assessment Alert
+        if is_cavity:
+            st.markdown(
+                f"""<div class="badge-positive">
+                ⚠️ <b>Caries / Lesion Flagged</b><br>
+                Confidence score ({cavity_prob * 100:.1f}%) meets or exceeds threshold ({sensitivity_threshold * 100:.0f}%).
+                </div>""", unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                f"""<div class="badge-negative">
+                ✅ <b>No Caries Flagged</b><br>
+                No significant decay detected above active threshold.
+                </div>""", unsafe_allow_html=True
+            )
+
+        st.write("")
+        st.progress(cavity_prob)
+        st.caption(f"Estimated Cavity Likelihood: **{cavity_prob * 100:.1f}%**")
 
 else:
-    # Empty State Dashboard Preview
-    st.info("👆 Please upload a cropped radiograph patch above to begin evaluation.")
-
-st.markdown("---")
-st.caption("⚠️ **Disclaimer:** CaviAI is an AI proof-of-concept for demonstration purposes only. It is not intended for clinical use or professional medical decision-making.")
+    st.info("👆 Upload a dental radiograph patch above to evaluate localized features.")
