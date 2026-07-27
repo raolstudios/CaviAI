@@ -1,4 +1,8 @@
-streamlit>=1.25.0
-torch>=2.0.0
-torchvision>=0.15.0
-Pillow>=9.5.0
+streamlit
+torch
+torchvision
+opencv-python-headless
+pillow
+numpy
+scikit-learn
+ultralytics
