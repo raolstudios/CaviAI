@@ -4,10 +4,10 @@ import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
 import numpy as np
-import cv2
+import matplotlib.pyplot as plt
 from sklearn.metrics import precision_recall_curve
 
-# Try loading YOLOv8 if installed
+# Try loading YOLOv8 conditionally if installed
 try:
     from ultralytics import YOLO
     YOLO_AVAILABLE = True
@@ -43,7 +43,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. GRAD-CAM & CLASSIFICATION PIPELINE
+# 2. GRAD-CAM & HEATMAP (PURE PIL/MATPLOTLIB)
 # ==========================================
 class ResNetGradCAM:
     def __init__(self, model):
@@ -51,7 +51,6 @@ class ResNetGradCAM:
         self.gradients = None
         self.activations = None
         
-        # Register hook on the final residual block
         target_layer = self.model.layer4[-1]
         target_layer.register_forward_hook(self._save_activations)
         target_layer.register_full_backward_hook(self._save_gradients)
@@ -67,16 +66,13 @@ class ResNetGradCAM:
         output = self.model(input_tensor)
         self.model.zero_grad()
         
-        # Backward pass for the cavity class score
         score = output[0, class_idx]
         score.backward()
 
-        # Compute weights from pooled gradients
         gradients = self.gradients.detach().cpu().numpy()[0]
         activations = self.activations.detach().cpu().numpy()[0]
         weights = np.mean(gradients, axis=(1, 2))
 
-        # Generate weighted feature map
         cam = np.zeros(activations.shape[1:], dtype=np.float32)
         for i, w in enumerate(weights):
             cam += w * activations[i]
@@ -88,23 +84,25 @@ class ResNetGradCAM:
         return cam, torch.softmax(output, dim=1)[0][1].item()
 
 def overlay_heatmap(original_pil, heatmap_arr, alpha=0.4):
-    img_np = np.array(original_pil)
-    h, w = img_np.shape[:2]
+    """Blends heatmap with raw radiograph without requiring OpenCV."""
+    w, h = original_pil.size
     
-    # Resize heatmap to match original image dimensions
-    heatmap_resized = cv2.resize(heatmap_arr, (w, h))
-    heatmap_uint8 = np.uint8(255 * heatmap_resized)
-    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-    heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
-
-    overlay = cv2.addWeighted(img_np, 1 - alpha, heatmap_color, alpha, 0)
+    # Resize heatmap array to match original image dimensions using PIL
+    heatmap_pil = Image.fromarray((heatmap_arr * 255).astype(np.uint8)).resize((w, h), Image.Resampling.BILINEAR)
+    heatmap_norm = np.array(heatmap_pil) / 255.0
+    
+    # Apply JET color map using Matplotlib
+    cmap = plt.get_cmap('jet')
+    heatmap_color = (cmap(heatmap_norm)[:, :, :3] * 255).astype(np.uint8)
+    
+    img_np = np.array(original_pil)
+    overlay = (img_np * (1 - alpha) + heatmap_color * alpha).astype(np.uint8)
     return Image.fromarray(overlay)
 
 # ==========================================
 # 3. OPTIMAL F1-SCORE CALCULATOR
 # ==========================================
 def calculate_optimal_f1_threshold(y_true, y_probs):
-    """Calculates the exact decision threshold maximizing the F1-Score."""
     precision, recall, thresholds = precision_recall_curve(y_true, y_probs)
     f1_scores = 2 * (precision * recall) / (precision + recall + 1e-8)
     best_idx = np.argmax(f1_scores)
@@ -153,7 +151,6 @@ with st.sidebar:
     st.caption("Advanced Clinical Visualization Engine")
     st.markdown("---")
     
-    # AI Visualization Mode Selection
     st.subheader("🎯 Visualization Method")
     viz_mode = st.radio(
         "Choose AI Detection Output:",
@@ -164,11 +161,9 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("⚙️ Threshold Optimization")
     
-    # Auto Maximize F1-Score Option
     use_max_f1 = st.checkbox("Maximize F1-Score Automatically", value=False)
     
     if use_max_f1:
-        # Example validation calibration data
         mock_y_true = np.array([0, 1, 1, 0, 1, 0, 1, 1, 0, 0])
         mock_y_probs = np.array([0.1, 0.85, 0.38, 0.2, 0.9, 0.15, 0.42, 0.7, 0.3, 0.05])
         
@@ -183,7 +178,7 @@ with st.sidebar:
         )
 
 # ==========================================
-# 6. MAIN INTERFACE & INFERENCE
+# 6. MAIN INTERFACE
 # ==========================================
 st.title("🦷 CaviAI")
 st.markdown("**Deep Learning Dental Cavity Detection Assistant**")
@@ -197,7 +192,6 @@ if uploaded_file is not None:
     cavity_prob = 0.0
     is_cavity = False
 
-    # Execute Selected Visualization Pipeline
     if "Grad-CAM" in viz_mode:
         if not resnet_loaded:
             st.error("ResNet model weights (`caviAI_v1.pth`) not found!")
@@ -215,18 +209,15 @@ if uploaded_file is not None:
             st.error("YOLOv8 model weights (`caviai_yolo.pt`) or `ultralytics` library missing.")
         else:
             results = yolo_model(raw_image, conf=sensitivity_threshold)
-            res_plotted = results[0].plot() # Draw bounding boxes
+            res_plotted = results[0].plot()
             processed_image = Image.fromarray(res_plotted)
             
             boxes = results[0].boxes
             cavity_prob = float(torch.max(boxes.conf).item()) if len(boxes) > 0 else 0.0
             is_cavity = len(boxes) > 0
 
-    # Display Results & Interactive Comparison
     if processed_image is not None:
         st.markdown("### 🔍 Before / After Comparison")
-        
-        # Interactive Side-by-Side Comparison
         col1, col2 = st.columns(2)
         with col1:
             st.caption("📷 Original Radiograph")
@@ -237,7 +228,6 @@ if uploaded_file is not None:
 
         st.markdown("---")
         
-        # Diagnostic Assessment Alert
         if is_cavity:
             st.markdown(
                 f"""<div class="badge-positive">
