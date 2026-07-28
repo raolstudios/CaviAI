@@ -3,4 +3,3 @@ torch
 torchvision
 pillow
 numpy
-opencv-python-headless

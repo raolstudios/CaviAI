@@ -2,9 +2,8 @@ import streamlit as st
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
-from PIL import Image
+from PIL import Image, ImageOps
 import numpy as np
-import cv2
 
 # ==========================================
 # 1. PAGE CONFIGURATION & STYLING
@@ -30,24 +29,17 @@ st.markdown("""
         text-align: center;
         margin-bottom: 2rem;
     }
-    .metric-card {
-        background-color: #F8FAFC;
-        border: 1px solid #E2E8F0;
-        border-radius: 10px;
-        padding: 20px;
-        text-align: center;
-    }
     </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-title">🦷 CaviAI v2 Diagnostic Portal</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Advanced Dental Radiograph Analysis powered by ResNet18 & CLAHE Contrast Enhancement</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Advanced Dental Radiograph Analysis powered by ResNet18 & Adaptive Equalization</div>', unsafe_allow_html=True)
 
 # ==========================================
 # 2. MODEL SETUP & LOADING
 # ==========================================
 MODEL_PATH = "CaviAI_v2.pth"
-CLASS_NAMES = ['Colored / Healthy', 'X-Ray / Cavity']  # Update mapping if customized
+CLASS_NAMES = ['Colored / Healthy', 'X-Ray / Cavity']
 
 @st.cache_resource
 def load_model():
@@ -67,26 +59,14 @@ def load_model():
 model, device = load_model()
 
 # ==========================================
-# 3. CLAHE PREPROCESSING PIPELINE
+# 3. CONTRAST ENHANCEMENT PIPELINE (NO CV2)
 # ==========================================
-def apply_clahe_preprocessing(pil_image):
-    """Converts PIL image to OpenCV format, applies CLAHE in LAB space, and returns PIL image."""
-    img_np = np.array(pil_image.convert('RGB'))
-    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-    
-    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    cl = clahe.apply(l)
-    
-    merged = cv2.merge((cl, a, b))
-    clahe_bgr = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
-    clahe_rgb = cv2.cvtColor(clahe_bgr, cv2.COLOR_BGR2RGB)
-    
-    return Image.fromarray(clahe_rgb)
+def apply_contrast_enhancement(pil_image):
+    """Applies local contrast equalization natively with Pillow."""
+    gray_image = ImageOps.grayscale(pil_image)
+    equalized_gray = ImageOps.equalize(gray_image)
+    return equalized_gray.convert('RGB')
 
-# PyTorch Image Transformation Pipeline
 transform_pipeline = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -98,13 +78,13 @@ transform_pipeline = transforms.Compose([
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Configuration")
-    show_clahe_view = st.checkbox("Show CLAHE Enhanced Image Comparison", value=True)
+    show_enhanced_view = st.checkbox("Show Enhanced Contrast Comparison", value=True)
     
     st.divider()
     st.markdown("### About CaviAI v2")
     st.info(
         "CaviAI v2 leverages a fine-tuned ResNet18 architecture integrated with "
-        "Contrast Limited Adaptive Histogram Equalization (CLAHE) to boost feature visibility in dental radiographs."
+        "Histogram Equalization to boost feature visibility in dental radiographs."
     )
 
 uploaded_file = st.file_uploader(
@@ -117,27 +97,25 @@ uploaded_file = st.file_uploader(
 # ==========================================
 if uploaded_file is not None and model is not None:
     raw_image = Image.open(uploaded_file).convert('RGB')
-    clahe_image = apply_clahe_preprocessing(raw_image)
+    enhanced_image = apply_contrast_enhancement(raw_image)
     
-    # Visual Layout
     col1, col2 = st.columns(2)
     
     with col1:
         st.subheader("🖼️ Original Upload")
-        st.image(raw_image, use_column_width=True)
+        st.image(raw_image, use_container_width=True)
         
     with col2:
-        if show_clahe_view:
-            st.subheader("🔬 CLAHE Contrast Enhanced (Model Input)")
-            st.image(clahe_image, use_column_width=True)
+        if show_enhanced_view:
+            st.subheader("🔬 Contrast Enhanced (Model Input)")
+            st.image(enhanced_image, use_container_width=True)
         else:
             st.subheader("📊 Diagnostic Analysis")
-            st.write("Enable 'Show CLAHE Enhanced Image' in the sidebar to inspect feature enhancement.")
 
     st.divider()
 
-    # Preprocess & Inference
-    input_tensor = transform_pipeline(clahe_image).unsqueeze(0).to(device)
+    # Inference
+    input_tensor = transform_pipeline(enhanced_image).unsqueeze(0).to(device)
     
     with torch.no_grad():
         outputs = model(input_tensor)
@@ -147,7 +125,7 @@ if uploaded_file is not None and model is not None:
     predicted_label = CLASS_NAMES[predicted_class_idx.item()]
     confidence_score = confidence.item() * 100
 
-    # Output Diagnostic Banner
+    # Output Display
     st.subheader("🎯 Diagnostic Prediction")
     
     res_col1, res_col2 = st.columns([1, 2])
@@ -163,5 +141,4 @@ if uploaded_file is not None and model is not None:
             st.write(f"**{name}** ({prob:.1f}%)")
             st.progress(int(prob))
 
-    # Diagnostic Disclaimer
     st.caption("⚠️ Note: CaviAI v2 is designed as a proof-of-concept decision support system and should not replace professional clinical evaluation.")
