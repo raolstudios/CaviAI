@@ -3,7 +3,4 @@ torch
 torchvision
 pillow
 numpy
-matplotlib
-scikit-learn
-ultralytics
 opencv-python-headless
