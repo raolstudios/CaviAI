@@ -4,6 +4,7 @@ import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image, ImageOps
 import numpy as np
+import matplotlib
 import matplotlib.cm as cm
 
 # ==========================================
@@ -54,7 +55,7 @@ def load_model():
         model.eval()
         return model, device
     except FileNotFoundError:
-        st.error(f"❌ Model file `{MODEL_PATH}` not found in root directory!")
+        st.error(f"❌ Model file `{MODEL_PATH}` not found in root directory! Please ensure it is uploaded.")
         return None, device
 
 model, device = load_model()
@@ -104,7 +105,7 @@ def generate_gradcam(model, input_tensor, target_class):
     return cam
 
 def overlay_heatmap(original_pil, cam_map):
-    """Overlays heatmap on top of original PIL radiograph."""
+    """Overlays heatmap on top of original PIL radiograph using modern Matplotlib API."""
     img_resized = original_pil.resize((224, 224))
     img_array = np.array(img_resized) / 255.0
 
@@ -112,8 +113,8 @@ def overlay_heatmap(original_pil, cam_map):
     cam_pil = Image.fromarray((cam_map * 255).astype(np.uint8)).resize((224, 224), Image.BILINEAR)
     cam_array = np.array(cam_pil) / 255.0
 
-    # Apply Jet Color Map
-    colormap = cm.get_cmap('jet')
+    # Apply Jet Color Map (Compatible with Matplotlib 3.7+)
+    colormap = matplotlib.colormaps['jet']
     heatmap = colormap(cam_array)[:, :, :3]
 
     # Blend original and heatmap
